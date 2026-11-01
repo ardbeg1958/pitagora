@@ -73,6 +73,31 @@ class Sound {
     o1.connect(g); o2.connect(g2); g2.connect(g); g.connect(this.master);
     o1.start(t); o2.start(t); o1.stop(t + 0.45); o2.stop(t + 0.45);
   }
+  click(freq, vol = 0.2) {
+    if (!this.on || !this.ctx) return;
+    const c = this.ctx, t = c.currentTime; if (t - (this.lastClick || 0) < 0.02) return; this.lastClick = t;
+    if (!this.noiseBuf) { const n = Math.floor(c.sampleRate * 0.08); this.noiseBuf = c.createBuffer(1, n, c.sampleRate); const d = this.noiseBuf.getChannelData(0); for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / n, 3); }
+    const src = c.createBufferSource(); src.buffer = this.noiseBuf;
+    const bp = c.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = freq * 3; bp.Q.value = 4;
+    const g = c.createGain(); g.gain.setValueAtTime(vol * 1.6, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.07);
+    src.connect(bp); bp.connect(g); g.connect(this.master); src.start(t); src.stop(t + 0.08);
+    // short woody body tone
+    const o = c.createOscillator(); o.type = 'triangle'; o.frequency.setValueAtTime(freq, t); o.frequency.exponentialRampToValueAtTime(freq * 0.8, t + 0.06);
+    const g2 = c.createGain(); g2.gain.setValueAtTime(0.0001, t); g2.gain.exponentialRampToValueAtTime(vol * 0.7, t + 0.003); g2.gain.exponentialRampToValueAtTime(0.0001, t + 0.09);
+    o.connect(g2); g2.connect(this.master); o.start(t); o.stop(t + 0.1);
+  }
+  whoosh(vol = 0.2) {
+    if (!this.on || !this.ctx) return;
+    const c = this.ctx, t = c.currentTime;
+    if (!this.wnBuf) { const n = Math.floor(c.sampleRate * 0.7); this.wnBuf = c.createBuffer(1, n, c.sampleRate); const d = this.wnBuf.getChannelData(0); for (let i = 0; i < n; i++) d[i] = Math.random() * 2 - 1; }
+    const src = c.createBufferSource(); src.buffer = this.wnBuf;
+    const bp = c.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 2.5; bp.frequency.setValueAtTime(400, t); bp.frequency.exponentialRampToValueAtTime(2600, t + 0.35); bp.frequency.exponentialRampToValueAtTime(900, t + 0.65);
+    const g = c.createGain(); g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + 0.25); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.65);
+    src.connect(bp); bp.connect(g); g.connect(this.master); src.start(t); src.stop(t + 0.7);
+    const o = c.createOscillator(); o.type = 'sine'; o.frequency.setValueAtTime(330, t); o.frequency.exponentialRampToValueAtTime(990, t + 0.4);
+    const g2 = c.createGain(); g2.gain.setValueAtTime(0.0001, t); g2.gain.exponentialRampToValueAtTime(vol * 0.6, t + 0.15); g2.gain.exponentialRampToValueAtTime(0.0001, t + 0.55);
+    o.connect(g2); g2.connect(this.master); o.start(t); o.stop(t + 0.6);
+  }
   idx(i, vol) { this.note(PENTA[((i % 8) + 8) % 8], vol); }
 }
 const sound = new Sound();
@@ -187,15 +212,18 @@ class GizmoModule {
   track(p0, p1, opt = {}) {
     const w = opt.width ?? TRACK_W, roll = opt.roll ?? 0, ext = opt.extend ?? 0.08, wallH = opt.wallH ?? 0.5;
     const d = p1.clone().sub(p0); const L = d.length(); const x = d.clone().normalize();
-    let z = new THREE.Vector3().crossVectors(x, Y).normalize(); let y = new THREE.Vector3().crossVectors(z, x).normalize();
-    if (roll) { y.applyAxisAngle(x, roll); z.applyAxisAngle(x, roll); }
+    let z, y;
+    if (opt.up) { y = opt.up.clone().addScaledVector(x, -opt.up.dot(x)).normalize(); z = new THREE.Vector3().crossVectors(x, y).normalize(); }
+    else { z = new THREE.Vector3().crossVectors(x, Y).normalize(); y = new THREE.Vector3().crossVectors(z, x).normalize(); }
+    if (opt.bankToward) { const c = opt.bankToward.clone().sub(p0.clone().add(p1).multiplyScalar(0.5)); c.y = 0; opt = Object.assign({}, opt, { roll: (opt.bank || 0.2) * Math.sign(c.dot(z)) || 0.2, wallHs: c.dot(z) > 0 ? [opt.outerH, opt.innerH] : [opt.innerH, opt.outerH] }); }
+    if (opt.roll) { y.applyAxisAngle(x, opt.roll); z.applyAxisAngle(x, opt.roll); }
     const q = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, y, z));
     const mid = p0.clone().add(p1).multiplyScalar(0.5);
     const floorMat = opt.floorMat || this.mat(PAL.wood), wallMat = opt.wallMat || this.mat(PAL.wood2);
-    this.box(mid.clone().addScaledVector(y, -0.1), new THREE.Vector3(L + ext, 0.2, w), q, floorMat, { friction: opt.friction ?? 0.25 });
+    this.box(mid.clone().addScaledVector(y, -0.1), new THREE.Vector3(L + ext, 0.2, w), q, floorMat, { friction: opt.friction ?? 0.25, collide: !opt.noFloorCollide });
     if (opt.walls !== false) for (const s of [-1, 1]) {
-      const wl = opt.wallLen ? opt.wallLen : L + ext;
-      this.box(mid.clone().addScaledVector(z, s * (w / 2 + 0.06)).addScaledVector(y, wallH / 2 - 0.2), new THREE.Vector3(wl, wallH, 0.12), q, wallMat, { friction: 0.05 });
+      const wl = opt.wallLen ? opt.wallLen : L + ext; const wh = opt.wallHs ? opt.wallHs[s < 0 ? 0 : 1] : wallH;
+      this.box(mid.clone().addScaledVector(z, s * (w / 2 + 0.06)).addScaledVector(y, wh / 2 - 0.2), new THREE.Vector3(wl, wh, 0.12), q, wallMat, { friction: 0.05 });
     }
     this.bound(p0.x, p0.y - 0.25, p0.z); this.bound(p1.x, p1.y - 0.25, p1.z);
     if (opt.pillar !== false) this.pillarAt(mid, z, w, y);
@@ -366,7 +394,7 @@ class DominoRelayModule extends GizmoModule {
       const x = start + i * 0.45;
       const part = this.addPart('dynamic', new THREE.Vector3(x, -0.7 + 0.42, 0), new THREE.Quaternion());
       this.box(new THREE.Vector3(0, 0, 0), new THREE.Vector3(0.1, 0.84, 0.66), null, this.mat(RAINBOW[(i + 2) % 8], 0, 0.55), { part, density: 0.22, friction: 0.35, rest: 0.02 });
-      this.dominoes.push({ part, fallen: false, i });
+      this.dominoes.push({ part, fallen: false, landed: false, i });
     }
     this.ballB = makeBall(this.toWorld(new THREE.Vector3(6.2, -0.7 + BALL_R + 0.01, 0)), 0x5b8fd6);
     this.ballB.owner = this; this.ballB.spawnOf = this; this.ballB.body.sleep();
@@ -376,14 +404,21 @@ class DominoRelayModule extends GizmoModule {
   }
   frame(dt) { super.frame(dt); if (this.spawnT >= 1.2 && this.ballB) this.ballB.spawnOf = null; }
   update(dt, ball, l) {
-    for (const d of this.dominoes) if (!d.fallen) { const r = d.part.body.rotation(); const tilt = 2 * Math.acos(Math.min(1, Math.abs(r.w))); if (tilt > 0.5) { d.fallen = true; sound.idx(d.i + 1, 0.2); } }
+    const nD = this.dominoes.length;
+    for (const d of this.dominoes) {
+      if (d.landed) continue;
+      const r = d.part.body.rotation(); const tilt = 2 * Math.acos(Math.min(1, Math.abs(r.w)));
+      if (!d.tipped && tilt > 0.08) { d.tipped = true; sound.click(520 * Math.pow(1.09, d.i), 0.22); stats.dominoClicks = (stats.dominoClicks || 0) + 1; }
+      if (!d.fallen && tilt > 0.5) { d.fallen = true; sound.idx(d.i + 1, 0.16); }
+      if (!d.landed && tilt > 1.05) { d.landed = true; sound.click(300 * Math.pow(1.09, d.i), 0.13); if (d.i === nD - 1) sound.click(760, 0.2); }
+    }
     if (!this.handed && this.ballB) {
       const v = this.ballB.body.linvel(); if (Math.hypot(v.x, v.y, v.z) > 0.25) this.handoff();
     }
   }
   handoff() {
     if (this.handed) return; this.handed = true; stats.handoffs++;
-    const old = this.stage.tracked; old.owner = this; this.stage.tracked = this.ballB; this.ballB.spawnOf = null; sound.idx(7, 0.24);
+    const old = this.stage.tracked; old.owner = this; this.stage.tracked = this.ballB; this.ballB.spawnOf = null; sound.click(880, 0.24); sound.idx(7, 0.24);
     this.stage.resetTimers();
   }
   onTeleport() { if (!this.handed) { this.ballB.body.wakeUp(); this.handoff(); } }
@@ -414,9 +449,9 @@ class ElevatorLiftModule extends GizmoModule {
     this.box(new THREE.Vector3(2.52, H + 0.62, -0.72), new THREE.Vector3(1.95, 0.1, 0.1), null, bm, { collide: false });
     this.box(new THREE.Vector3(2.52, H + 0.62, 0), new THREE.Vector3(0.1, 0.1, 1.5), null, bm, { collide: false });
     // exit slope
-    this.track(new THREE.Vector3(3.34, H - 0.66, 0), new THREE.Vector3(6.4, H - 1.1, 0), { extend: 0.02, floorMat: this.mat(PAL.peach, 0, 0.6) });
+    this.track(new THREE.Vector3(3.34, H - 0.66, 0), new THREE.Vector3(6.4, H - 1.35, 0), { extend: 0.02, floorMat: this.mat(PAL.peach, 0, 0.6) });
     this.state = 'idle'; this.t = 0; this.y = 0; this.tilt = this.tilt0;
-    this.setOut(new THREE.Vector3(6.4, H - 1.14, 0), new THREE.Vector3(1, 0, 0), 2.4);
+    this.setOut(new THREE.Vector3(6.4, H - 1.39, 0), new THREE.Vector3(1, 0, 0), 2.4);
     this.finish();
   }
   update(dt, ball, l) {
@@ -438,13 +473,156 @@ class ElevatorLiftModule extends GizmoModule {
       }
       this.setPartPose(this.cup, this.pivot0.clone().add(new THREE.Vector3(0, this.y, 0)), new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), this.tilt));
     }
-    this.riding = this.state === 'rise' || (this.state === 'tip' && l && l.x < 3.3);
+    this.riding = this.state === 'rise' || (this.state !== 'idle' && l && l.x < 3.4);
+  }
+}
+
+
+// 6. Spiral descent
+class SpiralDescentModule extends GizmoModule {
+  get name() { return 'らせんスロープ'; }
+  constructor(stage, inSocket) {
+    super(stage, inSocket);
+    const good = v => (v.x > 0.5 || v.z > 0.5);
+    const cands = [];
+    for (const q of [6, 7, 8, 9, 10]) for (const s of [-1, 1]) {
+      const th = q * Math.PI / 2; const d = this.dirWorld(new THREE.Vector3(Math.cos(th), 0, s * Math.sin(th))).round();
+      if (good(d)) cands.push({ q, s });
+    }
+    const pick = cands[Math.floor(Math.random() * cands.length)] || { q: 8, s: 1 };
+    const q = pick.q, s = pick.s; this.q4 = q; this.s = s;
+    const R = 1.8, drop = 0.32, NQ = 8, x0 = 0.4; this.R = R;
+    this.track(new THREE.Vector3(-0.1, 0.02, 0), new THREE.Vector3(x0, -0.02, 0));
+    const C = new THREE.Vector3(x0, 0, s * R); this.C = C;
+    const P = th => new THREE.Vector3(x0 + R * Math.sin(th), -0.02 - drop * th / (Math.PI / 2), s * R - s * R * Math.cos(th));
+    this.P = P; this.drop = drop;
+    const N = q * NQ;
+    const cols = [PAL.sky, PAL.lilac, PAL.mint, PAL.butter];
+    const acr = new THREE.MeshStandardMaterial({ color: 0xd6ecf7, metalness: 0.1, roughness: 0.15, transparent: true, opacity: 0.38, depthWrite: false }); this.mats.push(acr);
+    const bm = this.mat(PAL.brass, 0.6, 0.35);
+    for (let i = 0; i < N; i++) {
+      const t0 = i / NQ * Math.PI / 2, t1 = (i + 1) / NQ * Math.PI / 2;
+      this.track(P(t0), P(t1), { bankToward: C, bank: 0.16, outerH: 0.85, innerH: 0.42, extend: 0.16, wallMat: acr, floorMat: this.mat(cols[Math.floor(i / NQ) % 4], 0, 0.6), pillar: false });
+      if (i % 2 === 0) { // spoke from pole to underside
+        const p = P(t0); const a = new THREE.Vector3(C.x, p.y - 0.25, C.z), b = new THREE.Vector3(p.x, p.y - 0.25, p.z);
+        const L = a.distanceTo(b); const mq = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(1, 0, 0), b.clone().sub(a).normalize());
+        this.box(a.clone().add(b).multiplyScalar(0.5), new THREE.Vector3(L, 0.06, 0.06), mq, bm, { collide: false });
+      }
+      if (i % NQ === NQ - 1) { const k = Math.floor(i / NQ), yk = P(t1).y; this.checkpoints.push({ test: l => l.y < yk + 0.15, fn: () => sound.idx(7 - (k % 8), 0.17) }); }
+    }
+    const thE = q * Math.PI / 2, end = P(thE), dE = new THREE.Vector3(Math.cos(thE), 0, s * Math.sin(thE)).round();
+    const e2 = end.clone().addScaledVector(dE, 0.9); e2.y -= 0.08;
+    this.track(end, e2, { floorMat: this.mat(PAL.sky, 0, 0.6) });
+    // central pole (to ground) with cap
+    const gl = GROUND_Y - this.origin.y, top = 0.9;
+    this.cyl(new THREE.Vector3(C.x, (top + gl) / 2, C.z), 0.12, top - gl, this.mat(PAL.woodD, 0, 0.8));
+    this.cyl(new THREE.Vector3(C.x, gl + 0.05, C.z), 0.3, 0.1, bm);
+    const cap = this.cyl(new THREE.Vector3(C.x, top + 0.08, C.z), 0.2, 0.16, bm);
+    this.bound(C.x + R + 0.6, 0, C.z + R + 0.6); this.bound(C.x - R - 0.6, 0, C.z - R - 0.6);
+    this.advTol = 0.5; this.timeout = 5 + q * 1.3; this.setOut(e2.clone().add(new THREE.Vector3(0, -0.04, 0)), dE, 2.6);
+    this.finish();
+  }
+  update(dt, ball, l) {
+    if (!l || ball !== this.stage.tracked || this.stage.get(this.stage.active) !== this) return;
+    const r = Math.hypot(l.x - this.C.x, l.z - this.C.z);
+    if (Math.abs(r - this.R) < 0.9 && l.y < 0.3) { // gentle speed governor (felt-like drag)
+      const v = ball.body.linvel(), sp = Math.hypot(v.x, v.y, v.z);
+      if (sp > 4.0) { const k = Math.max(4.0 / sp, 0.97); ball.body.setLinvel({ x: v.x * k, y: v.y * k, z: v.z * k }, true); }
+    }
+  }
+}
+
+// 7. Loop-the-loop (corkscrew offset)
+class LoopTheLoopModule extends GizmoModule {
+  get name() { return '宙返りループ'; }
+  constructor(stage, inSocket) {
+    super(stage, inSocket);
+    const h = 3.8, Lr = 7.0, R = 0.9, D = 1.15, NL = 64; this.R = R; this.D = D;
+    const Ry = h => -h; // helper
+    // smooth ramp (cosine profile)
+    this.track(new THREE.Vector3(-0.1, 0.02, 0), new THREE.Vector3(0.3, -0.01, 0));
+    const ramp = x => -(h - 0.4) * (1 - Math.cos(Math.PI * x / Lr)) / 2 - 0.4 * Math.sin(Math.PI / 2 * x / Lr);
+    const NR = 24;
+    for (let i = 0; i < NR; i++) {
+      const xa = i / NR * Lr, xb = (i + 1) / NR * Lr;
+      this.track(new THREE.Vector3(0.3 + xa, ramp(xa) - 0.01, 0), new THREE.Vector3(0.3 + xb, ramp(xb) - 0.01, 0), { extend: 0.06, floorMat: this.mat(i % 2 ? PAL.peach : 0xf9d3b2, 0, 0.6), pillar: i % 3 === 1 });
+    }
+    const xc = 0.3 + Lr, yb = -h - 0.01; this.xc = xc; this.yb = yb; this.cy = yb + R;
+    // loop ring: floor faces centre
+    const LP = f => new THREE.Vector3(xc + R * Math.sin(f), yb + R - R * Math.cos(f), D * (1 - Math.cos(f / 2)) / 2);
+    const acr = new THREE.MeshStandardMaterial({ color: 0xcfe8f5, metalness: 0.1, roughness: 0.15, transparent: true, opacity: 0.32, depthWrite: false }); this.mats.push(acr);
+    const lfm = RAINBOW.map(c => { const m = new THREE.MeshStandardMaterial({ color: c, metalness: 0.1, roughness: 0.4, transparent: true, opacity: 0.62 }); this.mats.push(m); return m; });
+    for (let i = 0; i < NL; i++) {
+      const f0 = i / NL * Math.PI * 2, f1 = (i + 1) / NL * Math.PI * 2, fm = (f0 + f1) / 2;
+      const up = new THREE.Vector3(-Math.sin(fm), Math.cos(fm), 0);
+      const m = this.track(LP(f0), LP(f1), { up, noFloorCollide: true, extend: 0.03, wallH: 0.6, floorMat: lfm[(i >> 3) % 8], wallMat: acr, pillar: false });
+    }
+    { // smooth collision surface for the loop floor (trimesh)
+      const M = 128, K = 8, vs = [], ix = [];
+      for (let i = 0; i <= M; i++) { const f = i / M * Math.PI * 2; const p = LP(f); const n = new THREE.Vector3(-Math.sin(f), Math.cos(f), 0);
+        for (let j = 0; j <= K; j++) { const u = (j / K - 0.5) * 0.86; const hh = 0.5 - Math.sqrt(0.25 - u * u); vs.push(p.x + n.x * hh, p.y + n.y * hh, p.z + u); } }
+      for (let i = 0; i < M; i++) for (let j = 0; j < K; j++) { const a = i * (K + 1) + j, b = a + K + 1; ix.push(a, b, a + 1, a + 1, b, b + 1); }
+      world.createCollider(RAPIER.ColliderDesc.trimesh(new Float32Array(vs), new Uint32Array(ix)).setFriction(0.25).setRestitution(0.0), this.body);
+    }
+    // exit: flat, gentle rise, felt brake
+    const ex = [[xc, yb, D], [xc + 0.8, yb, D]];
+    this.track(new THREE.Vector3(xc - 0.05, yb, D), new THREE.Vector3(xc + 0.8, yb, D), { floorMat: this.mat(PAL.mint, 0, 0.6) });
+    const rise = 0.6, Lu = 4.0, NU = 8; const ru = x => rise * (1 - Math.cos(Math.PI * x / Lu)) / 2;
+    for (let i = 0; i < NU; i++) {
+      const xa = i / NU * Lu, xb = (i + 1) / NU * Lu;
+      this.track(new THREE.Vector3(xc + 0.8 + xa, yb + ru(xa), D), new THREE.Vector3(xc + 0.8 + xb, yb + ru(xb), D), { extend: 0.06, floorMat: this.mat(PAL.mint, 0, 0.6), pillar: i % 3 === 1 });
+    }
+    const xb0 = xc + 0.8 + Lu; this.xb0 = xb0;
+    this.track(new THREE.Vector3(xb0, yb + rise, D), new THREE.Vector3(xb0 + 1.8, yb + rise - 0.12, D), { floorMat: this.mat(0x7f9e86, 0, 1), friction: 0.5 });
+    // support frame for the loop
+    const bm = this.mat(PAL.brass, 0.6, 0.35), gl = GROUND_Y - this.origin.y;
+    for (const zz of [-0.75, D + 0.75]) {
+      const topY = yb + 2 * R + 0.25;
+      this.cyl(new THREE.Vector3(xc, (topY + gl) / 2, zz), 0.06, topY - gl, bm);
+      this.cyl(new THREE.Vector3(xc, gl + 0.04, zz), 0.14, 0.08, bm);
+    }
+    this.box(new THREE.Vector3(xc, yb + 2 * R + 0.25, D / 2), new THREE.Vector3(0.1, 0.1, D + 1.5), null, bm, { collide: false });
+    for (const xx of [xc - 0.5, xc + 0.5]) this.pillars.push(new THREE.Vector3(xx, yb - 0.3, D / 2));
+    this.box(new THREE.Vector3(xc, yb - 0.25, D / 2), new THREE.Vector3(1.4, 0.08, D + 1.0), null, this.mat(PAL.woodD, 0, 0.8), { collide: false });
+    this.checkpoints.push({ test: l => l.y > this.cy + R * 0.55 && l.x > xc - R && l.x < xc + R && l.z > 0.1, fn: () => { sound.whoosh(0.22); sound.idx(7, 0.14); stats.loopTop = (stats.loopTop || 0) + 1; this.topHit = true; } });
+    this.checkpoints.push({ test: l => l.x > xc + 0.6 && l.z > D * 0.6 && l.y < yb + 0.6, fn: () => sound.idx(4, 0.18) });
+    this.bound(xc, yb + 2 * R, D + 0.6); this.bound(xc, yb, -0.6);
+    this.timeout = 11; this.setOut(new THREE.Vector3(xb0 + 1.8, yb + rise - 0.16, D), new THREE.Vector3(1, 0, 0), 2.6);
+    this.finish();
+  }
+  update(dt, ball, l) {
+    if (!l || ball !== this.stage.tracked || this.stage.get(this.stage.active) !== this) return;
+    const g = 9.81, R = this.R, Re = R - BALL_R;
+    const dx = l.x - this.xc, dy = l.y - this.cy; const r = Math.hypot(dx, dy);
+    const v = ball.body.linvel(); const sp = Math.hypot(v.x, v.y, v.z);
+    if (Math.abs(r - Re) < 0.3 && l.z > -0.2 && l.z < this.D + 0.3) {
+      const f = Math.atan2(dx, -dy); const fu = (f + Math.PI * 2) % (Math.PI * 2);
+      const prog = 2 * Math.acos(THREE.MathUtils.clamp(1 - 2 * l.z / this.D, -1, 1)); // which revolution part via lateral offset
+      if (!params.has('noassist') && prog > 0.15 && prog < 3.6 && fu > 0.25 && fu < 3.5) {
+        const hh = Re * (1 - Math.cos(fu));
+        const need = Math.sqrt(1.0 * g * Re + (10 / 7) * g * Math.max(0, 2 * Re - hh));
+        if (sp < need) {
+          const t = this.dirWorld(new THREE.Vector3(R * Math.cos(fu), R * Math.sin(fu), this.D / 4 * Math.sin(fu / 2)).normalize());
+          const k = Math.min(need, sp + 6 * dt); ball.body.setLinvel({ x: t.x * k, y: t.y * k, z: t.z * k }, true);
+          (stats.loopDef = stats.loopDef || []).length < 60 && stats.loopDef.push([fu.toFixed(2), sp.toFixed(2), need.toFixed(2)].join('/'));
+          if (!this.assisted) { this.assisted = true; stats.log['loop:assist'] = (stats.log['loop:assist'] || 0) + 1; }
+        }
+      }
+    }
+    // after loop: keep moving up the rise, then felt brake
+    if (l.z > this.D * 0.6 && l.x > this.xc + 0.5 && Math.abs(l.y - this.yb - 0.4) < 1.0) {
+      const d = this.dirWorld(new THREE.Vector3(1, 0, 0));
+      const along = v.x * d.x + v.z * d.z;
+      if (l.x > this.xb0 - 0.2 && sp > 2.8) { const k = Math.max(2.8 / sp, 0.94); ball.body.setLinvel({ x: v.x * k, y: v.y * k, z: v.z * k }, true); }
+      else if (l.x < this.xb0 && along < 1.4) { ball.body.applyImpulse({ x: d.x * 0.01, y: 0, z: d.z * 0.01 }, true); }
+    }
   }
 }
 
 // ---------------- Stage manager ----------------
-const TYPES = { chime: ChimeSlopeModule, curve: CornerCurveModule, seesaw: SeesawDropModule, domino: DominoRelayModule, lift: ElevatorLiftModule };
-const DROPS = { chime: 2.1, curve: 0.9, seesaw: 5.2, domino: 1.65 };
+const TYPES = { chime: ChimeSlopeModule, curve: CornerCurveModule, seesaw: SeesawDropModule, domino: DominoRelayModule, lift: ElevatorLiftModule, spiral: SpiralDescentModule, loop: LoopTheLoopModule };
+const DROPS = { chime: 2.1, curve: 0.9, seesaw: 5.2, domino: 1.65, spiral: 3.8, loop: 3.3 };
+const DEPTH = { spiral: 3.9, loop: 4.2 }; // lowest point below the in-socket
 const TOP_Y = 11.5, LOW_Y = 1.6;
 class StageManager {
   constructor() {
@@ -462,14 +640,14 @@ class StageManager {
     const needLift = this.lastType !== 'lift' && (this.sinceLift >= this.liftEvery || y < 5.5);
     if (needLift && this.modules.length + this.base > 0) type = 'lift';
     else {
-      const opts = ['chime', 'curve', 'seesaw', 'domino'].filter(t => t !== this.lastType && y - DROPS[t] > LOW_Y);
+      const opts = ['chime', 'curve', 'seesaw', 'domino', 'spiral', 'loop'].filter(t => t !== this.lastType && y - Math.max(DROPS[t], DEPTH[t] || 0) > LOW_Y);
       type = opts.length ? opts[Math.floor(Math.random() * opts.length)] : 'lift';
       if (type === 'lift' && this.lastType === 'lift') type = 'curve';
     }
     if (SEQ) type = SEQ[(this.base + this.modules.length) % SEQ.length];
     const M = new TYPES[type](this, sock, { targetY: TOP_Y });
     M.type = type; this.modules.push(M); stats.modulesCreated++;
-    if (type === 'lift') { this.sinceLift = 0; this.liftEvery = 3 + (Math.random() < 0.5 ? 0 : 1); } else this.sinceLift++;
+    if (type === 'lift') { this.sinceLift = 0; this.liftEvery = 3 + (Math.random() < 0.5 ? 0 : 1); } else this.sinceLift += (type === 'spiral' || type === 'loop' ? 2 : 1);
     this.lastType = type;
     return M;
   }
@@ -482,10 +660,26 @@ class StageManager {
   }
   resetTimers() { this.stuckT = 0; this.modT = 0; }
   advance() {
+    { const m = this.get(this.active); const pm = this.get(this.active - 1); const k = (pm ? pm.type + '>' : '') + m.type + (this.tele ? ':tele' : ':ok'); (stats.pass = stats.pass || {})[k] = (stats.pass[k] || 0) + 1; if (m.type === 'loop' && !this.tele) stats.loopClean = (stats.loopClean || 0) + (m.topHit ? 1 : 0); this.tele = false; }
     this.active++; stats.chain++; this.resetTimers(); for (const c of this.get(this.active).checkpoints) c.hit = false;
     while (this.nextIndex() <= this.active + 3) this.spawnNext();
-    while (this.base <= this.active - 2) { this.modules.shift().disposeAll(); this.base++; }
+    this.cull(true);
     updateChain(); updateName();
+  }
+  // dispose passed modules only once fully outside the camera view (pillars included); hard cap as fallback
+  cull(hard) {
+    const MAX_MODS = 14;
+    camera.updateMatrixWorld(); frustumM.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse); frustum.setFromProjectionMatrix(frustumM);
+    while (this.base <= this.active - 2) {
+      const m = this.modules[0];
+      const over = this.modules.length > MAX_MODS;
+      if (!over) {
+        if (!m.bbox) { m.bbox = new THREE.Box3().setFromObject(m.group); m.bbox.min.y = Math.min(m.bbox.min.y, GROUND_Y); m.bbox.expandByScalar(1.2); }
+        if (frustum.intersectsBox(m.bbox)) break;
+      }
+      this.modules.shift().disposeAll(); this.base++; stats.disposed = (stats.disposed || 0) + 1; if (over) stats.capDisposed = (stats.capDisposed || 0) + 1;
+    }
+    stats.maxLive = Math.max(stats.maxLive || 0, this.modules.length);
   }
   teleport(kind) {
     const m = this.get(this.active); m.onTeleport();
@@ -494,7 +688,8 @@ class StageManager {
     b.setTranslation({ x: p.x, y: p.y, z: p.z }, true);
     b.setLinvel({ x: s.direction.x * s.expectedSpeed, y: 0, z: s.direction.z * s.expectedSpeed }, true); b.setAngvel({ x: 0, y: 0, z: 0 }, true);
     stats.log[m.type + ':' + kind] = (stats.log[m.type + ':' + kind] || 0) + 1;
-    if (kind === 'timeout') stats.timeoutTeleports++; else stats.fallTeleports++;
+    if (stats.trace) (stats.teleTr = stats.teleTr || []).length < 4 && stats.teleTr.push(stats.trace.slice(-12).join(' | '));
+    this.tele = true; if (kind === 'timeout') stats.timeoutTeleports++; else stats.fallTeleports++;
     this.advance();
   }
   nudge() {
@@ -506,18 +701,18 @@ class StageManager {
     const t = b.translation(); const pos = new THREE.Vector3(t.x, t.y, t.z); const l = m.toLocal(pos);
     for (const mm of this.modules) mm.update(dt, this.tracked, mm === m ? l : (mm === this.get(this.active + 1) ? mm.toLocal(pos) : null));
     m.checkpointsUpdate(l);
-    if (SEQ && (stats.steps % 15 === 0)) { (stats.trace = stats.trace || []).push(m.type + ' ' + this.modT.toFixed(2) + ' ' + l.x.toFixed(2) + ',' + l.y.toFixed(2) + ',' + l.z.toFixed(2)); if (stats.trace.length > 400) stats.trace.shift(); }
+    if (stats.steps % 15 === 0) { (stats.trace = stats.trace || []).push(m.type + ' ' + this.modT.toFixed(2) + ' ' + l.x.toFixed(2) + ',' + l.y.toFixed(2) + ',' + l.z.toFixed(2)); if (stats.trace.length > 400) stats.trace.shift(); }
     const v = b.linvel(); const sp = Math.hypot(v.x, v.y, v.z);
     const vv = new THREE.Vector3(v.x, v.y, v.z); if (vv.distanceTo(this.prevV) > 2.2 && dt > 0) sound.idx(Math.floor(Math.random() * 5), 0.08); this.prevV.copy(vv);
     // advance check
     const s = m.outSocket; const rel = pos.clone().sub(s.position);
-    if (rel.dot(s.direction) > 0.05 && Math.abs(rel.y) < 2.5) {
+    if (rel.dot(s.direction) > 0.05 && Math.abs(rel.y) < (m.advTol || 2.5)) {
       const lat = rel.clone().addScaledVector(s.direction, -rel.dot(s.direction)); lat.y = 0;
       if (lat.length() < 1.6) { this.advance(); return; }
     }
     if (!m.riding) this.modT += dt;
     if (pos.y < m.minY - 3.0) { this.teleport('fall'); return; }
-    if (this.modT > 8) { this.teleport('timeout'); return; }
+    if (this.modT > (m.timeout || 8)) { this.teleport('timeout'); return; }
     if (sp < 0.15 && !m.riding) { this.stuckT += dt; if (this.stuckT > 1.5) { this.stuckT = 0; stats.stuckAssists++; stats.log[m.type + ':stuck'] = (stats.log[m.type + ':stuck'] || 0) + 1; b.wakeUp(); const d = s.direction; b.applyImpulse({ x: d.x * 0.09, y: 0.02, z: d.z * 0.09 }, true); } }
     else this.stuckT = 0;
   }
@@ -539,12 +734,13 @@ function applyCam() {
 if (settings.sound) { sound.on = true; const unlock = () => { sound.ensure(); removeEventListener('pointerdown', unlock); }; addEventListener('pointerdown', unlock); }
 
 // ---------------- Main loop ----------------
+const frustum = new THREE.Frustum(), frustumM = new THREE.Matrix4();
 const stage = new StageManager(); stage.init();
 const camTarget = stage.get(0).center.clone();
 camera.position.copy(camTarget).add(CAM_OFF); camera.lookAt(camTarget); controls.target.copy(camTarget);
 applyCam(); renderButtons(); updateChain();
 document.getElementById('panel').style.display = ''; msg.style.display = 'none';
-window.__pg = { stats, stage, world, renderer, balls, THREE };
+window.__pg = { stats, stage, world, renderer, balls, THREE, camera };
 
 let acc = 0, lastT = performance.now();
 function loop(now) {
@@ -565,6 +761,7 @@ function loop(now) {
   else { const d = camTarget.clone().sub(prevT); camera.position.add(d); controls.target.add(d); controls.update(); }
   sun.position.copy(camTarget).add(new THREE.Vector3(-8, 22, 10)); sun.target.position.copy(camTarget);
   ground.position.x = grid.position.x = Math.round(camTarget.x / 2) * 2; ground.position.z = grid.position.z = Math.round(camTarget.z / 2) * 2;
+  stage.cull();
   renderer.render(scene, camera);
 }
 requestAnimationFrame(loop);
