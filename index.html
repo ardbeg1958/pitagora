@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<title>無限ピタゴラ装置</title>
+<meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#f4f1ea">
+<link rel="manifest" href="manifest.webmanifest"><link rel="apple-touch-icon" href="apple-touch-icon.png">
+<style>
+html,body{margin:0;height:100%;overflow:hidden;background:#f4f1ea;font-family:-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif;-webkit-user-select:none;user-select:none;touch-action:none}
+canvas{display:block}
+#panel{position:fixed;top:calc(10px + env(safe-area-inset-top));right:calc(10px + env(safe-area-inset-right));background:rgba(255,252,245,.62);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);border-radius:12px;padding:8px;display:flex;flex-direction:column;gap:6px;box-shadow:0 2px 10px rgba(80,60,30,.15);opacity:.85}
+#panel button{font:inherit;font-size:13px;border:0;border-radius:8px;padding:7px 10px;background:rgba(201,162,74,.22);color:#4a3b25;min-width:118px;text-align:left}
+#panel button:active{background:rgba(201,162,74,.45)}
+#chain{font-size:15px;color:#4a3b25;text-align:center;font-variant-numeric:tabular-nums;letter-spacing:.04em;padding:2px 0}
+#gname{position:fixed;left:calc(12px + env(safe-area-inset-left));bottom:calc(12px + env(safe-area-inset-bottom));color:rgba(74,59,37,.65);font-size:13px;letter-spacing:.05em}
+#msg{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;color:#6b5a3e;font-size:15px;text-align:center;padding:20px;pointer-events:none}
+</style>
+<script type="importmap">{"imports":{
+"three":"https://unpkg.com/three@0.160.0/build/three.module.js",
+"three/addons/":"https://unpkg.com/three@0.160.0/examples/jsm/",
+"@dimforge/rapier3d-compat":"https://unpkg.com/@dimforge/rapier3d-compat@0.12.0/rapier.es.js"}}</script>
+</head><body>
+<div id="msg">読み込み中…</div>
+<div id="panel" style="display:none">
+<button id="bSound">♪ 音: OFF</button>
+<button id="bCam">◎ カメラ: 自動</button>
+<button id="bNudge">☞ ボールをひと押し</button>
+<div id="chain">Chain: 0000</div>
+</div>
+<div id="gname"></div>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import * as RAPIER_NS from '@dimforge/rapier3d-compat';
+const RAPIER = RAPIER_NS.default || RAPIER_NS;
+
+const params = new URLSearchParams(location.search);
+const FAST = Math.max(1, Math.min(12, parseInt(params.get('fast') || '1', 10)));
+const SEQ = params.get('seq') ? params.get('seq').split(',') : null;
+const LS_KEY = 'pitagora_v1';
+let settings = { sound: false, cam: 'auto' };
+try { Object.assign(settings, JSON.parse(localStorage.getItem(LS_KEY) || '{}')); } catch (e) {}
+const saveSettings = () => { try { localStorage.setItem(LS_KEY, JSON.stringify(settings)); } catch (e) {} };
+
+const PENTA = [261.63, 293.66, 329.63, 392.00, 440.00, 523.25, 587.33, 659.25];
+const BALL_R = 0.25, TRACK_W = 0.8, GROUND_Y = 0;
+const Y = new THREE.Vector3(0, 1, 0);
+const PAL = { wood: 0xcfa774, wood2: 0xb98d5a, woodD: 0x9a7048, brass: 0xc9a24a, mint: 0xa8d5c2, pink: 0xf2b5b0, sky: 0xa9c6e8, butter: 0xf3d98b, lilac: 0xc9b6e4, peach: 0xf6c49a };
+const RAINBOW = [0xf2b5b0, 0xf6c49a, 0xf3d98b, 0xa8d5c2, 0xa9c6e8, 0xc9b6e4, 0xf2b5b0, 0xf6c49a];
+
+const stats = { log: {}, chain: 0, stuckAssists: 0, timeoutTeleports: 0, fallTeleports: 0, nudges: 0, handoffs: 0, modulesCreated: 0, simTime: 0, steps: 0 };
+
+// ---------------- Audio ----------------
+class Sound {
+  constructor() { this.ctx = null; this.on = false; this.master = null; this.last = 0; }
+  ensure() {
+    if (!this.ctx) {
+      const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return;
+      this.ctx = new AC(); this.master = this.ctx.createGain(); this.master.gain.value = 0.55;
+      const comp = this.ctx.createDynamicsCompressor(); this.master.connect(comp); comp.connect(this.ctx.destination);
+    }
+    if (this.ctx.state === 'suspended') this.ctx.resume();
+  }
+  note(freq, vol = 0.22) {
+    if (!this.on || !this.ctx) return;
+    const t = this.ctx.currentTime; if (t - this.last < 0.025) return; this.last = t;
+    const g = this.ctx.createGain(); g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(vol, t + 0.006); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.4);
+    const o1 = this.ctx.createOscillator(); o1.type = 'sine'; o1.frequency.value = freq;
+    const o2 = this.ctx.createOscillator(); o2.type = 'triangle'; o2.frequency.value = freq * 2;
+    const g2 = this.ctx.createGain(); g2.gain.value = 0.25;
+    o1.connect(g); o2.connect(g2); g2.connect(g); g.connect(this.master);
+    o1.start(t); o2.start(t); o1.stop(t + 0.45); o2.stop(t + 0.45);
+  }
+  idx(i, vol) { this.note(PENTA[((i % 8) + 8) % 8], vol); }
+}
+const sound = new Sound();
+
+// ---------------- Boot ----------------
+const msg = document.getElementById('msg');
+try { await RAPIER.init(); } catch (e) { msg.textContent = '物理エンジンを読み込めませんでした（インターネット接続が必要です）'; throw e; }
+const world = new RAPIER.World({ x: 0, y: -9.81, z: 0 });
+world.timestep = 1 / 60;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene(); scene.background = new THREE.Color(0xf4f1ea);
+const VIEW = 15;
+const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, -200, 400);
+const CAM_OFF = new THREE.Vector3(20, 20 * Math.SQRT2 * 0.8, 20);
+function resize() {
+  const a = innerWidth / innerHeight; const h = a < 1 ? VIEW / a * 0.75 : VIEW;
+  camera.left = -h * a / 2; camera.right = h * a / 2; camera.top = h / 2; camera.bottom = -h / 2; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+}
+resize(); addEventListener('resize', resize);
+scene.add(new THREE.HemisphereLight(0xfff8ec, 0xb9a88c, 1.1));
+const sun = new THREE.DirectionalLight(0xfff3dd, 1.9);
+sun.castShadow = true; sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -16, right: 16, top: 16, bottom: -16, near: 1, far: 80 });
+sun.shadow.bias = -0.0006; sun.shadow.normalBias = 0.02;
+scene.add(sun, sun.target);
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(400, 400), new THREE.MeshStandardMaterial({ color: 0xe9e2d3, roughness: 1 }));
+ground.rotation.x = -Math.PI / 2; ground.position.y = GROUND_Y; ground.receiveShadow = true; scene.add(ground);
+const grid = new THREE.GridHelper(400, 200, 0xd9cfbb, 0xe0d8c6); grid.position.y = 0.01; scene.add(grid);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true; controls.enableRotate = true; controls.screenSpacePanning = true;
+controls.touches = { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN };
+controls.minZoom = 0.35; controls.maxZoom = 4; controls.enabled = false;
+
+// ---------------- Balls ----------------
+const sphereGeo = new THREE.SphereGeometry(BALL_R, 28, 18);
+const balls = new Set();
+function makeBall(pos, color) {
+  const body = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(pos.x, pos.y, pos.z).setCcdEnabled(true).setLinearDamping(0.02).setAngularDamping(0.05));
+  world.createCollider(RAPIER.ColliderDesc.ball(BALL_R).setDensity(1.0).setFriction(0.35).setRestitution(0.12), body);
+  const mesh = new THREE.Mesh(sphereGeo, new THREE.MeshStandardMaterial({ color, metalness: 0.35, roughness: 0.3 }));
+  mesh.castShadow = true; mesh.receiveShadow = true; scene.add(mesh);
+  const b = { body, mesh, owner: null, spawnOf: null }; balls.add(b); syncBall(b); return b;
+}
+function syncBall(b) {
+  const t = b.body.translation(), r = b.body.rotation();
+  b.mesh.position.set(t.x, t.y, t.z); b.mesh.quaternion.set(r.x, r.y, r.z, r.w);
+  if (b.spawnOf) { const s = b.spawnOf.spawnScale(); b.mesh.scale.setScalar(s); b.mesh.position.y -= b.spawnOf.spawnDrop(); }
+}
+function removeBall(b) { world.removeRigidBody(b.body); scene.remove(b.mesh); b.mesh.material.dispose(); balls.delete(b); }
+
+// ---------------- Module base ----------------
+const tmpV = new THREE.Vector3(), tmpQ = new THREE.Quaternion();
+const easeOutBack = t => { const c1 = 1.4, c3 = c1 + 1; return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2); };
+const easeInOut = t => t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+
+class GizmoModule {
+  constructor(stage, inSocket, opts = {}) {
+    this.stage = stage; this.opts = opts;
+    this.origin = inSocket.position.clone();
+    this.yaw = Math.atan2(-inSocket.direction.z, inSocket.direction.x);
+    this.q = new THREE.Quaternion().setFromAxisAngle(Y, this.yaw); this.qInv = this.q.clone().invert();
+    this.inSocket = { position: this.origin.clone(), direction: inSocket.direction.clone(), expectedSpeed: inSocket.expectedSpeed };
+    this.group = new THREE.Group(); this.group.position.copy(this.origin); this.group.quaternion.copy(this.q); scene.add(this.group);
+    this.body = world.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(this.origin.x, this.origin.y, this.origin.z).setRotation(this.q));
+    this.bodies = [this.body]; this.parts = []; this.mats = []; this.geos = []; this.pillars = [];
+    this.minYLocal = 0; this.maxYLocal = 0; this.minX = 0; this.maxX = 0; this.minZ = 0; this.maxZ = 0;
+    this.age = 0; this.riding = false; this.checkpoints = [];
+    this.matCache = {};
+  }
+  get name() { return ''; }
+  mat(color, metal = 0, rough = 0.75) {
+    const k = color + '_' + metal + '_' + rough; if (this.matCache[k]) return this.matCache[k];
+    const m = new THREE.MeshStandardMaterial({ color, metalness: metal, roughness: rough }); this.mats.push(m); this.matCache[k] = m; return m;
+  }
+  bound(x, y, z) {
+    this.minYLocal = Math.min(this.minYLocal, y); this.maxYLocal = Math.max(this.maxYLocal, y);
+    this.minX = Math.min(this.minX, x); this.maxX = Math.max(this.maxX, x); this.minZ = Math.min(this.minZ, z); this.maxZ = Math.max(this.maxZ, z);
+  }
+  toWorld(v) { return v.clone().applyQuaternion(this.q).add(this.origin); }
+  toLocal(v) { return v.clone().sub(this.origin).applyQuaternion(this.qInv); }
+  dirWorld(v) { return v.clone().applyQuaternion(this.q); }
+  // a box mesh + optional collider; parent = this (static) or a part
+  box(pos, size, quat, material, opts = {}) {
+    const target = opts.part || null;
+    const geo = new THREE.BoxGeometry(size.x, size.y, size.z); this.geos.push(geo);
+    const mesh = new THREE.Mesh(geo, material); mesh.position.copy(pos); if (quat) mesh.quaternion.copy(quat);
+    mesh.castShadow = true; mesh.receiveShadow = true;
+    (target ? target.mesh : this.group).add(mesh);
+    if (opts.collide !== false) {
+      const cd = RAPIER.ColliderDesc.cuboid(size.x / 2, size.y / 2, size.z / 2).setTranslation(pos.x, pos.y, pos.z)
+        .setFriction(opts.friction ?? 0.25).setRestitution(opts.rest ?? 0.1);
+      if (quat) cd.setRotation({ x: quat.x, y: quat.y, z: quat.z, w: quat.w });
+      if (opts.density) cd.setDensity(opts.density);
+      world.createCollider(cd, target ? target.body : this.body);
+    }
+    if (!target) this.bound(pos.x, pos.y - size.y / 2, pos.z);
+    return mesh;
+  }
+  cyl(p, r, h, material) {
+    const geo = new THREE.CylinderGeometry(r, r, h, 10); this.geos.push(geo);
+    const m = new THREE.Mesh(geo, material); m.position.copy(p); m.castShadow = true; m.receiveShadow = true; this.group.add(m); return m;
+  }
+  // straight guided track from p0 to p1 (local, top surface points)
+  track(p0, p1, opt = {}) {
+    const w = opt.width ?? TRACK_W, roll = opt.roll ?? 0, ext = opt.extend ?? 0.08, wallH = opt.wallH ?? 0.5;
+    const d = p1.clone().sub(p0); const L = d.length(); const x = d.clone().normalize();
+    let z = new THREE.Vector3().crossVectors(x, Y).normalize(); let y = new THREE.Vector3().crossVectors(z, x).normalize();
+    if (roll) { y.applyAxisAngle(x, roll); z.applyAxisAngle(x, roll); }
+    const q = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, y, z));
+    const mid = p0.clone().add(p1).multiplyScalar(0.5);
+    const floorMat = opt.floorMat || this.mat(PAL.wood), wallMat = opt.wallMat || this.mat(PAL.wood2);
+    this.box(mid.clone().addScaledVector(y, -0.1), new THREE.Vector3(L + ext, 0.2, w), q, floorMat, { friction: opt.friction ?? 0.25 });
+    if (opt.walls !== false) for (const s of [-1, 1]) {
+      const wl = opt.wallLen ? opt.wallLen : L + ext;
+      this.box(mid.clone().addScaledVector(z, s * (w / 2 + 0.06)).addScaledVector(y, wallH / 2 - 0.2), new THREE.Vector3(wl, wallH, 0.12), q, wallMat, { friction: 0.05 });
+    }
+    this.bound(p0.x, p0.y - 0.25, p0.z); this.bound(p1.x, p1.y - 0.25, p1.z);
+    if (opt.pillar !== false) this.pillarAt(mid, z, w, y);
+    return { q, x, y, z, mid, L };
+  }
+  pillarAt(mid, z, w, yv) {
+    for (const s of [-1, 1]) {
+      const p = mid.clone().addScaledVector(z || new THREE.Vector3(0, 0, 1), s * (w / 2 + 0.2)); p.y -= 0.15;
+      this.pillars.push(p);
+    }
+  }
+  buildPillars() {
+    const pm = this.mat(PAL.woodD, 0, 0.8), bm = this.mat(PAL.brass, 0.6, 0.35);
+    for (const p of this.pillars) {
+      const groundLocal = GROUND_Y - this.origin.y; const h = p.y - groundLocal; if (h < 0.1) continue;
+      this.cyl(new THREE.Vector3(p.x, groundLocal + h / 2, p.z), 0.05, h, pm);
+      this.cyl(new THREE.Vector3(p.x, groundLocal + 0.04, p.z), 0.13, 0.08, bm);
+    }
+  }
+  addPart(kind, localPos, localRot) {
+    const wpos = this.toWorld(localPos), wrot = this.q.clone().multiply(localRot || new THREE.Quaternion());
+    let desc = kind === 'kinematic' ? RAPIER.RigidBodyDesc.kinematicPositionBased() : RAPIER.RigidBodyDesc.dynamic();
+    desc.setTranslation(wpos.x, wpos.y, wpos.z).setRotation({ x: wrot.x, y: wrot.y, z: wrot.z, w: wrot.w });
+    if (kind === 'dynamic') desc.setCanSleep(true);
+    const body = world.createRigidBody(desc); this.bodies.push(body);
+    const mesh = new THREE.Group(); this.group.add(mesh);
+    const part = { body, mesh, kind }; this.parts.push(part); this.syncPart(part); return part;
+  }
+  setPartPose(part, localPos, localRot) {
+    const wpos = this.toWorld(localPos), wrot = this.q.clone().multiply(localRot);
+    part.body.setNextKinematicTranslation({ x: wpos.x, y: wpos.y, z: wpos.z });
+    part.body.setNextKinematicRotation({ x: wrot.x, y: wrot.y, z: wrot.z, w: wrot.w });
+  }
+  syncPart(part) {
+    const t = part.body.translation(), r = part.body.rotation();
+    tmpV.set(t.x, t.y, t.z).sub(this.origin).applyQuaternion(this.qInv);
+    part.mesh.position.copy(tmpV); tmpQ.set(r.x, r.y, r.z, r.w); part.mesh.quaternion.copy(this.qInv).multiply(tmpQ);
+  }
+  setOut(local, dirLocal, speed) {
+    this.outLocal = local.clone(); this.outDirLocal = dirLocal.clone();
+    this.outSocket = { position: this.toWorld(local), direction: this.dirWorld(dirLocal).round(), expectedSpeed: speed };
+    const c = new THREE.Vector3((this.minX + this.maxX) / 2, (this.minYLocal + this.maxYLocal) / 2, (this.minZ + this.maxZ) / 2);
+    this.center = this.toWorld(c); this.minY = this.origin.y + this.minYLocal;
+  }
+  finish() { this.buildPillars(); this.spawnT = 0; this.applySpawn(); }
+  spawnProgress() { return Math.min(1, this.spawnT / 1.1); }
+  spawnScale() { return 0.25 + 0.75 * Math.min(1.05, easeOutBack(this.spawnProgress())); }
+  spawnDrop() { return 3 * (1 - easeInOut(this.spawnProgress())); }
+  applySpawn() { this.group.scale.setScalar(this.spawnScale()); this.group.position.y = this.origin.y - this.spawnDrop(); }
+  frame(dt) { if (this.spawnT < 1.2) { this.spawnT += dt; this.applySpawn(); } for (const p of this.parts) this.syncPart(p); }
+  update(dt, ball, local) {}
+  checkpointsUpdate(local) {
+    for (const c of this.checkpoints) if (!c.hit && c.test(local)) { c.hit = true; c.fn(); }
+  }
+  onTeleport() {}
+  disposeAll() {
+    for (const b of [...balls]) if (b.owner === this && b !== this.stage.tracked) removeBall(b);
+    for (const b of this.bodies) world.removeRigidBody(b);
+    scene.remove(this.group);
+    for (const g of this.geos) g.dispose(); for (const m of this.mats) m.dispose();
+    this.bodies = []; this.parts = []; this.geos = []; this.mats = [];
+  }
+}
+
+// 1. Chime stair slope
+class ChimeSlopeModule extends GizmoModule {
+  get name() { return 'チャイム階段スロープ'; }
+  constructor(stage, inSocket) {
+    super(stage, inSocket);
+    const n = 7, seg = 1.25, drop = 0.2, step = 0.06; let y = 0; const base = Math.floor(Math.random() * 3);
+    const up = Math.random() < 0.5;
+    this.track(new THREE.Vector3(-0.1, 0.02, 0), new THREE.Vector3(0.4, -0.02, 0));
+    let x = 0.4;
+    for (let i = 0; i < n; i++) {
+      const p0 = new THREE.Vector3(x, y, 0), p1 = new THREE.Vector3(x + seg, y - drop, 0);
+      this.track(p0, p1, { floorMat: this.mat(RAINBOW[i], 0, 0.6) });
+      const plateMat = this.mat(PAL.brass, 0.7, 0.3);
+      const tq = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), -Math.atan2(drop, seg));
+      this.box(new THREE.Vector3(x + 0.06, y + 0.005, 0), new THREE.Vector3(0.1, 0.03, TRACK_W * 0.9), tq, plateMat, { collide: false });
+      const cx = x + 0.1, note = up ? base + i : base + n - 1 - i;
+      this.checkpoints.push({ test: l => l.x > cx, fn: () => { sound.idx(note, 0.22); this.flash(i); } });
+      x += seg; y -= drop + step;
+    }
+    this.lastY = y + step;
+    this.setOut(new THREE.Vector3(x, y + step - 0.04, 0), new THREE.Vector3(1, 0, 0), 3.0);
+    this.finish();
+  }
+  flash(i) { const m = this.mats.find(m => m.color.getHex() === RAINBOW[i]); if (m) { m.emissive.setHex(0x553311); setTimeout(() => m.emissive.setHex(0), 180); } }
+}
+
+// 2. 90deg banked curve
+class CornerCurveModule extends GizmoModule {
+  get name() { return '90度バンクカーブ'; }
+  constructor(stage, inSocket) {
+    super(stage, inSocket);
+    // choose turn so that world out direction is +X or +Z
+    const dW = inSocket.direction; let s;
+    const leftW = this.dirWorld(new THREE.Vector3(0, 0, -1)).round(), rightW = this.dirWorld(new THREE.Vector3(0, 0, 1)).round();
+    const good = v => (v.x > 0.5 || v.z > 0.5);
+    s = good(rightW) ? 1 : (good(leftW) ? -1 : 1);
+    const R = 2.2, drop = 0.7, N = 9;
+    this.track(new THREE.Vector3(-0.1, 0.02, 0), new THREE.Vector3(0.3, -0.02, 0));
+    const P = t => new THREE.Vector3(0.3 + R * Math.sin(t), -0.02 - drop * (t / (Math.PI / 2)), s * R * (1 - Math.cos(t)));
+    for (let i = 0; i < N; i++) {
+      const t0 = i / N * Math.PI / 2, t1 = (i + 1) / N * Math.PI / 2;
+      this.track(P(t0), P(t1), { roll: -s * 0.14, extend: 0.22, wallH: 0.55, floorMat: this.mat(i % 2 ? PAL.mint : 0xbfe3d3, 0, 0.6), wallMat: this.mat(PAL.wood2), pillar: i % 3 === 1 });
+      if (i % 3 === 1) { const tc = (t0 + t1) / 2, k = i; this.checkpoints.push({ test: l => Math.abs(l.z) > Math.abs(P(tc).z) - 0.05 && l.x > P(tc).x - 0.4, fn: () => sound.idx(3 + k / 3, 0.16) }); }
+    }
+    const end = P(Math.PI / 2);
+    const e2 = end.clone().add(new THREE.Vector3(0, -0.06, s * 0.5));
+    this.track(end, e2, { floorMat: this.mat(PAL.mint, 0, 0.6) });
+    this.setOut(e2.clone().add(new THREE.Vector3(0, -0.04, 0)), new THREE.Vector3(0, 0, s), 2.6);
+    this.finish();
+  }
+}
+
+// 3. Seesaw drop
+class SeesawDropModule extends GizmoModule {
+  get name() { return 'シーソー転換器'; }
+  constructor(stage, inSocket) {
+    super(stage, inSocket);
+    this.track(new THREE.Vector3(-0.1, 0.02, 0), new THREE.Vector3(1.45, -0.4, 0));
+    this.pivot = new THREE.Vector3(3.2, -0.62, 0); this.ang0 = 0.24; this.ang1 = -0.36; this.ang = this.ang0;
+    this.plank = this.addPart('kinematic', this.pivot, new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), this.ang0));
+    const pm = this.mat(PAL.pink, 0, 0.6), wm = this.mat(PAL.wood2);
+    this.box(new THREE.Vector3(0, -0.1, 0), new THREE.Vector3(3.0, 0.2, 0.9), null, pm, { part: this.plank, friction: 0.3 });
+    for (const s of [-1, 1]) this.box(new THREE.Vector3(0, 0.12, s * 0.51), new THREE.Vector3(3.0, 0.45, 0.12), null, wm, { part: this.plank, friction: 0.05 });
+    this.box(new THREE.Vector3(-1.46, 0.06, 0), new THREE.Vector3(0.08, 0.16, 0.9), null, wm, { part: this.plank });
+    // pivot stand
+    const bm = this.mat(PAL.brass, 0.7, 0.3);
+    for (const s of [-1, 1]) { this.box(new THREE.Vector3(3.2, -0.95, s * 0.66), new THREE.Vector3(0.16, 0.7, 0.1), null, bm, { collide: false }); this.pillars.push(new THREE.Vector3(3.2, -1.3, s * 0.66)); }
+    this.cyl(new THREE.Vector3(3.2, -0.72, 0), 0.06, 1.45, bm).rotation.x = Math.PI / 2;
+    // level 2 reverse slope
+    this.track(new THREE.Vector3(5.6, -1.95, 0), new THREE.Vector3(1.0, -2.95, 0), { floorMat: this.mat(PAL.sky, 0, 0.6) });
+    this.box(new THREE.Vector3(5.72, -1.45, 0), new THREE.Vector3(0.12, 1.2, 1.0), null, wm);
+    // level 3 forward slope
+    this.track(new THREE.Vector3(0.25, -4.1, 0), new THREE.Vector3(5.8, -5.0, 0), { floorMat: this.mat(PAL.butter, 0, 0.6) });
+    this.box(new THREE.Vector3(0.1, -3.4, 0), new THREE.Vector3(0.12, 1.5, 1.0), null, wm);
+    this.state = 'idle'; this.t = 0; this.onT = 0;
+    this.setOut(new THREE.Vector3(5.8, -5.04, 0), new THREE.Vector3(1, 0, 0), 2.6);
+    this.checkpoints.push({ test: l => l.y < -1.6 && l.x > 3.5, fn: () => sound.idx(2, 0.2) });
+    this.checkpoints.push({ test: l => l.y < -3.7 && l.y > -6.5, fn: () => sound.idx(0, 0.22) });
+    this.finish();
+  }
+  update(dt, ball, l) {
+    if (l && this.state === 'idle' && l.x > 1.7 && l.x < 4.7 && l.y < -0.1 && l.y > -1.2) { this.onT += dt; if (this.onT > 0.3) { this.state = 'down'; this.t = 0; sound.idx(1, 0.25); } }
+    if (this.state !== 'idle') {
+      this.t += dt;
+      if (this.state === 'down') { this.ang = this.ang0 + (this.ang1 - this.ang0) * easeInOut(Math.min(1, this.t / 0.45)); if (this.t > 2.4) { this.state = 'up'; this.t = 0; } }
+      else if (this.state === 'up') { this.ang = this.ang1 + (this.ang0 - this.ang1) * easeInOut(Math.min(1, this.t / 1.0)); if (this.t > 1.0) { this.state = 'idle'; this.onT = 0; } }
+      this.setPartPose(this.plank, this.pivot, new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), this.ang));
+    }
+  }
+}
+
+// 4. Domino relay
+class DominoRelayModule extends GizmoModule {
+  get name() { return 'ドミノ・リレー'; }
+  constructor(stage, inSocket) {
+    super(stage, inSocket);
+    const W = 1.0;
+    this.track(new THREE.Vector3(-0.1, 0.02, 0), new THREE.Vector3(2.0, -0.7, 0), { width: W });
+    this.track(new THREE.Vector3(2.0, -0.7, 0), new THREE.Vector3(6.45, -0.7, 0), { width: W, floorMat: this.mat(0xe6d3b3, 0, 0.8), friction: 0.45 });
+    this.track(new THREE.Vector3(6.45, -0.7, 0), new THREE.Vector3(9.6, -1.55, 0), { width: W });
+    this.dominoes = []; const n = 5 + Math.floor(Math.random() * 2);
+    const start = 5.55 - (n - 1) * 0.45;
+    for (let i = 0; i < n; i++) {
+      const x = start + i * 0.45;
+      const part = this.addPart('dynamic', new THREE.Vector3(x, -0.7 + 0.42, 0), new THREE.Quaternion());
+      this.box(new THREE.Vector3(0, 0, 0), new THREE.Vector3(0.1, 0.84, 0.66), null, this.mat(RAINBOW[(i + 2) % 8], 0, 0.55), { part, density: 0.22, friction: 0.35, rest: 0.02 });
+      this.dominoes.push({ part, fallen: false, i });
+    }
+    this.ballB = makeBall(this.toWorld(new THREE.Vector3(6.2, -0.7 + BALL_R + 0.01, 0)), 0x5b8fd6);
+    this.ballB.owner = this; this.ballB.spawnOf = this; this.ballB.body.sleep();
+    this.handed = false;
+    this.setOut(new THREE.Vector3(9.6, -1.59, 0), new THREE.Vector3(1, 0, 0), 2.6);
+    this.finish();
+  }
+  frame(dt) { super.frame(dt); if (this.spawnT >= 1.2 && this.ballB) this.ballB.spawnOf = null; }
+  update(dt, ball, l) {
+    for (const d of this.dominoes) if (!d.fallen) { const r = d.part.body.rotation(); const tilt = 2 * Math.acos(Math.min(1, Math.abs(r.w))); if (tilt > 0.5) { d.fallen = true; sound.idx(d.i + 1, 0.2); } }
+    if (!this.handed && this.ballB) {
+      const v = this.ballB.body.linvel(); if (Math.hypot(v.x, v.y, v.z) > 0.25) this.handoff();
+    }
+  }
+  handoff() {
+    if (this.handed) return; this.handed = true; stats.handoffs++;
+    const old = this.stage.tracked; old.owner = this; this.stage.tracked = this.ballB; this.ballB.spawnOf = null; sound.idx(7, 0.24);
+    this.stage.resetTimers();
+  }
+  onTeleport() { if (!this.handed) { this.ballB.body.wakeUp(); this.handoff(); } }
+}
+
+// 5. Elevator lift
+class ElevatorLiftModule extends GizmoModule {
+  get name() { return 'エレベーター・リフト'; }
+  constructor(stage, inSocket, opts) {
+    super(stage, inSocket);
+    const H = THREE.MathUtils.clamp(opts.targetY - inSocket.position.y, 3, 10); this.H = H;
+    this.track(new THREE.Vector3(-0.1, 0.02, 0), new THREE.Vector3(1.55, -0.1, 0));
+    this.pivot0 = new THREE.Vector3(2.4, -0.4, 0); this.tilt0 = -0.07; this.tilt1 = -0.26;
+    this.cup = this.addPart('kinematic', this.pivot0, new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), this.tilt0));
+    const cm = this.mat(PAL.lilac, 0, 0.55), wm = this.mat(PAL.wood2), bm = this.mat(PAL.brass, 0.7, 0.3);
+    this.box(new THREE.Vector3(0, -0.1, 0), new THREE.Vector3(1.4, 0.2, 1.0), null, cm, { part: this.cup });
+    for (const s of [-1, 1]) this.box(new THREE.Vector3(0, 0.2, s * 0.56), new THREE.Vector3(1.4, 0.6, 0.12), null, wm, { part: this.cup });
+    this.box(new THREE.Vector3(-0.66, 0.07, 0), new THREE.Vector3(0.08, 0.14, 1.0), null, wm, { part: this.cup });
+    // stopper column
+    const sh = H - 0.86 + 0.65;
+    this.box(new THREE.Vector3(3.25, -0.65 + sh / 2, 0), new THREE.Vector3(0.12, sh, 1.1), null, this.mat(PAL.woodD, 0, 0.8));
+    // posts
+    for (const sx of [1.62, 3.42]) for (const s of [-1, 1]) {
+      const top = H + 0.6, gl = GROUND_Y - this.origin.y;
+      this.cyl(new THREE.Vector3(sx, (top + gl) / 2, s * 0.72), 0.055, top - gl, bm);
+    }
+    this.box(new THREE.Vector3(2.52, H + 0.62, 0.72), new THREE.Vector3(1.95, 0.1, 0.1), null, bm, { collide: false });
+    this.box(new THREE.Vector3(2.52, H + 0.62, -0.72), new THREE.Vector3(1.95, 0.1, 0.1), null, bm, { collide: false });
+    this.box(new THREE.Vector3(2.52, H + 0.62, 0), new THREE.Vector3(0.1, 0.1, 1.5), null, bm, { collide: false });
+    // exit slope
+    this.track(new THREE.Vector3(3.34, H - 0.66, 0), new THREE.Vector3(6.4, H - 1.1, 0), { extend: 0.02, floorMat: this.mat(PAL.peach, 0, 0.6) });
+    this.state = 'idle'; this.t = 0; this.y = 0; this.tilt = this.tilt0;
+    this.setOut(new THREE.Vector3(6.4, H - 1.14, 0), new THREE.Vector3(1, 0, 0), 2.4);
+    this.finish();
+  }
+  update(dt, ball, l) {
+    const inCup = l && l.x > 1.75 && l.x < 3.2 && Math.abs(l.y - (this.pivot0.y + this.y + 0.25)) < 0.6;
+    if (this.state === 'idle' && inCup) { this.t += dt; if (this.t > 0.4) { this.state = 'rise'; this.t = 0; sound.idx(0, 0.2); this.noteI = 0; } }
+    else if (this.state === 'idle') this.t = 0;
+    else {
+      this.t += dt;
+      if (this.state === 'rise') {
+        const T = 1.2 + this.H * 0.22; const e = easeInOut(Math.min(1, this.t / T)); this.y = this.H * e;
+        const k = Math.floor(e * 6); if (k > this.noteI) { this.noteI = k; sound.idx(k, 0.14); }
+        if (this.t >= T) { this.state = 'tip'; this.t = 0; sound.idx(7, 0.2); }
+      } else if (this.state === 'tip') {
+        this.tilt = this.tilt0 + (this.tilt1 - this.tilt0) * easeInOut(Math.min(1, this.t / 0.5));
+        if (this.t > 1.6) { this.state = 'down'; this.t = 0; }
+      } else if (this.state === 'down') {
+        const e = easeInOut(Math.min(1, this.t / 2.2)); this.y = this.H * (1 - e); this.tilt = this.tilt1 + (this.tilt0 - this.tilt1) * Math.min(1, this.t / 0.6);
+        if (this.t >= 2.2) { this.state = 'idle'; this.t = 0; }
+      }
+      this.setPartPose(this.cup, this.pivot0.clone().add(new THREE.Vector3(0, this.y, 0)), new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), this.tilt));
+    }
+    this.riding = this.state === 'rise' || (this.state === 'tip' && l && l.x < 3.3);
+  }
+}
+
+// ---------------- Stage manager ----------------
+const TYPES = { chime: ChimeSlopeModule, curve: CornerCurveModule, seesaw: SeesawDropModule, domino: DominoRelayModule, lift: ElevatorLiftModule };
+const DROPS = { chime: 2.1, curve: 0.9, seesaw: 5.2, domino: 1.65 };
+const TOP_Y = 11.5, LOW_Y = 1.6;
+class StageManager {
+  constructor() {
+    this.modules = []; this.base = 0; this.active = 0; this.lastType = null; this.sinceLift = 0; this.liftEvery = 3 + (Math.random() < 0.5 ? 0 : 1);
+    this.tracked = null; this.stuckT = 0; this.modT = 0; this.prevV = new THREE.Vector3();
+  }
+  get(i) { return this.modules[i - this.base]; }
+  lastModule() { return this.modules[this.modules.length - 1]; }
+  nextIndex() { return this.base + this.modules.length; }
+  spawnNext() {
+    const prev = this.lastModule();
+    const sock = prev ? prev.outSocket : { position: new THREE.Vector3(0, TOP_Y, 0), direction: new THREE.Vector3(1, 0, 0), expectedSpeed: 2 };
+    let type;
+    const y = sock.position.y;
+    const needLift = this.lastType !== 'lift' && (this.sinceLift >= this.liftEvery || y < 5.5);
+    if (needLift && this.modules.length + this.base > 0) type = 'lift';
+    else {
+      const opts = ['chime', 'curve', 'seesaw', 'domino'].filter(t => t !== this.lastType && y - DROPS[t] > LOW_Y);
+      type = opts.length ? opts[Math.floor(Math.random() * opts.length)] : 'lift';
+      if (type === 'lift' && this.lastType === 'lift') type = 'curve';
+    }
+    if (SEQ) type = SEQ[(this.base + this.modules.length) % SEQ.length];
+    const M = new TYPES[type](this, sock, { targetY: TOP_Y });
+    M.type = type; this.modules.push(M); stats.modulesCreated++;
+    if (type === 'lift') { this.sinceLift = 0; this.liftEvery = 3 + (Math.random() < 0.5 ? 0 : 1); } else this.sinceLift++;
+    this.lastType = type;
+    return M;
+  }
+  init() {
+    for (let i = 0; i < 4; i++) this.spawnNext();
+    const m0 = this.modules[0];
+    this.tracked = makeBall(m0.toWorld(new THREE.Vector3(0.3, BALL_R + 0.2, 0)), 0xd9534f);
+    this.tracked.body.setLinvel({ x: 1.5, y: 0, z: 0 }, true);
+    updateName();
+  }
+  resetTimers() { this.stuckT = 0; this.modT = 0; }
+  advance() {
+    this.active++; stats.chain++; this.resetTimers(); for (const c of this.get(this.active).checkpoints) c.hit = false;
+    while (this.nextIndex() <= this.active + 3) this.spawnNext();
+    while (this.base <= this.active - 2) { this.modules.shift().disposeAll(); this.base++; }
+    updateChain(); updateName();
+  }
+  teleport(kind) {
+    const m = this.get(this.active); m.onTeleport();
+    const s = m.outSocket, b = this.tracked.body;
+    const p = s.position.clone().addScaledVector(s.direction, 0.1); p.y += BALL_R + 0.08;
+    b.setTranslation({ x: p.x, y: p.y, z: p.z }, true);
+    b.setLinvel({ x: s.direction.x * s.expectedSpeed, y: 0, z: s.direction.z * s.expectedSpeed }, true); b.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    stats.log[m.type + ':' + kind] = (stats.log[m.type + ':' + kind] || 0) + 1;
+    if (kind === 'timeout') stats.timeoutTeleports++; else stats.fallTeleports++;
+    this.advance();
+  }
+  nudge() {
+    const m = this.get(this.active), b = this.tracked.body; b.wakeUp();
+    const d = m.outSocket.direction; b.applyImpulse({ x: d.x * 0.18, y: 0.12, z: d.z * 0.18 }, true); stats.nudges++;
+  }
+  step(dt) {
+    const m = this.get(this.active), b = this.tracked.body;
+    const t = b.translation(); const pos = new THREE.Vector3(t.x, t.y, t.z); const l = m.toLocal(pos);
+    for (const mm of this.modules) mm.update(dt, this.tracked, mm === m ? l : (mm === this.get(this.active + 1) ? mm.toLocal(pos) : null));
+    m.checkpointsUpdate(l);
+    if (SEQ && (stats.steps % 15 === 0)) { (stats.trace = stats.trace || []).push(m.type + ' ' + this.modT.toFixed(2) + ' ' + l.x.toFixed(2) + ',' + l.y.toFixed(2) + ',' + l.z.toFixed(2)); if (stats.trace.length > 400) stats.trace.shift(); }
+    const v = b.linvel(); const sp = Math.hypot(v.x, v.y, v.z);
+    const vv = new THREE.Vector3(v.x, v.y, v.z); if (vv.distanceTo(this.prevV) > 2.2 && dt > 0) sound.idx(Math.floor(Math.random() * 5), 0.08); this.prevV.copy(vv);
+    // advance check
+    const s = m.outSocket; const rel = pos.clone().sub(s.position);
+    if (rel.dot(s.direction) > 0.05 && Math.abs(rel.y) < 2.5) {
+      const lat = rel.clone().addScaledVector(s.direction, -rel.dot(s.direction)); lat.y = 0;
+      if (lat.length() < 1.6) { this.advance(); return; }
+    }
+    if (!m.riding) this.modT += dt;
+    if (pos.y < m.minY - 3.0) { this.teleport('fall'); return; }
+    if (this.modT > 8) { this.teleport('timeout'); return; }
+    if (sp < 0.15 && !m.riding) { this.stuckT += dt; if (this.stuckT > 1.5) { this.stuckT = 0; stats.stuckAssists++; stats.log[m.type + ':stuck'] = (stats.log[m.type + ':stuck'] || 0) + 1; b.wakeUp(); const d = s.direction; b.applyImpulse({ x: d.x * 0.09, y: 0.02, z: d.z * 0.09 }, true); } }
+    else this.stuckT = 0;
+  }
+}
+
+// ---------------- UI ----------------
+const elChain = document.getElementById('chain'), elName = document.getElementById('gname');
+const bS = document.getElementById('bSound'), bC = document.getElementById('bCam'), bN = document.getElementById('bNudge');
+function updateChain() { elChain.textContent = 'Chain: ' + String(stats.chain).padStart(4, '0'); }
+function updateName() { const m = stage.get(stage.active); elName.textContent = m ? m.name : ''; }
+function renderButtons() { bS.textContent = '♪ 音: ' + (sound.on ? 'ON' : 'OFF'); bC.textContent = '◎ カメラ: ' + (settings.cam === 'auto' ? '自動' : '自由'); }
+bS.onclick = () => { sound.on = !sound.on; settings.sound = sound.on; if (sound.on) { sound.ensure(); sound.idx(4, 0.2); } saveSettings(); renderButtons(); };
+bC.onclick = () => { settings.cam = settings.cam === 'auto' ? 'free' : 'auto'; applyCam(); saveSettings(); renderButtons(); };
+bN.onclick = () => stage.nudge();
+function applyCam() {
+  controls.enabled = settings.cam === 'free';
+  if (settings.cam === 'auto') { camera.zoom = 1; camera.updateProjectionMatrix(); }
+}
+if (settings.sound) { sound.on = true; const unlock = () => { sound.ensure(); removeEventListener('pointerdown', unlock); }; addEventListener('pointerdown', unlock); }
+
+// ---------------- Main loop ----------------
+const stage = new StageManager(); stage.init();
+const camTarget = stage.get(0).center.clone();
+camera.position.copy(camTarget).add(CAM_OFF); camera.lookAt(camTarget); controls.target.copy(camTarget);
+applyCam(); renderButtons(); updateChain();
+document.getElementById('panel').style.display = ''; msg.style.display = 'none';
+window.__pg = { stats, stage, world, renderer, balls, THREE };
+
+let acc = 0, lastT = performance.now();
+function loop(now) {
+  requestAnimationFrame(loop);
+  let dt = Math.min(0.1, (now - lastT) / 1000); lastT = now;
+  const H = 1 / 60; let n = 0;
+  if (FAST > 1) n = FAST; else { acc += dt; n = Math.min(4, Math.floor(acc / H)); acc -= n * H; if (acc > H) acc = 0; }
+  for (let i = 0; i < n; i++) { world.step(); stage.step(H); stats.simTime += H; stats.steps++; }
+  const fdt = n * H;
+  for (const m of stage.modules) m.frame(fdt);
+  for (const b of balls) syncBall(b);
+  // camera
+  const tb = stage.tracked.body.translation(); const am = stage.get(stage.active);
+  const want = new THREE.Vector3(tb.x, tb.y, tb.z).multiplyScalar(0.7).addScaledVector(am.center, 0.3);
+  const prevT = camTarget.clone();
+  camTarget.lerp(want, 1 - Math.pow(1 - 0.04, Math.max(1, fdt * 60)));
+  if (settings.cam === 'auto') { camera.position.copy(camTarget).add(CAM_OFF); camera.lookAt(camTarget); controls.target.copy(camTarget); }
+  else { const d = camTarget.clone().sub(prevT); camera.position.add(d); controls.target.add(d); controls.update(); }
+  sun.position.copy(camTarget).add(new THREE.Vector3(-8, 22, 10)); sun.target.position.copy(camTarget);
+  ground.position.x = grid.position.x = Math.round(camTarget.x / 2) * 2; ground.position.z = grid.position.z = Math.round(camTarget.z / 2) * 2;
+  renderer.render(scene, camera);
+}
+requestAnimationFrame(loop);
+</script>
+</body></html>
